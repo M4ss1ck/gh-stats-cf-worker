@@ -2,6 +2,8 @@
 
 A Cloudflare Worker that generates dynamic GitHub stats SVG cards, including data from private repositories.
 
+Based on [github-readme-stats](https://github.com/anuraghazra/github-readme-stats)
+
 ## Features
 
 - **Stats Card** (`/`) - Shows total stars, commits, PRs, issues, repos, and contribution rank
