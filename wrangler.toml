@@ -1,9 +1,9 @@
-name = "gh-stats"
+name = 'gh-stats-cf-worker'
 main = "src/index.ts"
 compatibility_date = "2024-11-27"
 
 [vars]
-# GITHUB_USERNAME = "your-username"  # Set via wrangler secret or dashboard
+GITHUB_USERNAME = "M4ss1ck"
 
 # Secrets (set via `wrangler secret put`):
 # - GITHUB_TOKEN
