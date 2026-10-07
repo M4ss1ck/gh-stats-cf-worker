@@ -73,6 +73,13 @@ GITHUB_TOKEN=your_github_token_here
 GITHUB_USERNAME=your_username_here
 ```
 
+### Tests
+
+```bash
+pnpm test        # vitest, GitHub API is mocked (no token needed)
+pnpm typecheck   # tsc
+```
+
 ## Endpoints
 
 ### Stats Card
