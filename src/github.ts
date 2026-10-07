@@ -199,31 +199,33 @@ async function fetchMoreStars(
   };
 }
 
-export async function fetchLanguageStats(token: string, username: string): Promise<LanguageStats[]> {
-  const query = `
-    query($username: String!) {
-      user(login: $username) {
-        repositories(first: 100, ownerAffiliations: OWNER, isFork: false, orderBy: {direction: DESC, field: PUSHED_AT}) {
-          nodes {
-            languages(first: 10, orderBy: {direction: DESC, field: SIZE}) {
-              edges {
-                size
-                node {
-                  name
-                  color
-                }
+// Every page must use the same query and orderBy: a cursor is only valid for
+// the ordering that produced it.
+const LANGUAGES_QUERY = `
+  query($username: String!, $cursor: String) {
+    user(login: $username) {
+      repositories(first: 100, ownerAffiliations: OWNER, isFork: false, after: $cursor, orderBy: {direction: DESC, field: PUSHED_AT}) {
+        nodes {
+          languages(first: 10, orderBy: {direction: DESC, field: SIZE}) {
+            edges {
+              size
+              node {
+                name
+                color
               }
             }
           }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
     }
-  `;
+  }
+`;
 
+export async function fetchLanguageStats(token: string, username: string): Promise<LanguageStats[]> {
   interface LanguageEdge {
     size: number;
     node: { name: string; color: string | null };
@@ -242,42 +244,34 @@ export async function fetchLanguageStats(token: string, username: string): Promi
     };
   }
 
-  const data = await graphqlRequest<LanguageStatsResponse>(token, query, { username });
-
   // Aggregate languages across all repos
   const languageMap = new Map<string, { size: number; color: string }>();
-
-  for (const repo of data.user.repositories.nodes) {
-    for (const edge of repo.languages.edges) {
-      const name = edge.node.name;
-      const existing = languageMap.get(name);
-      if (existing) {
-        existing.size += edge.size;
-      } else {
-        languageMap.set(name, {
-          size: edge.size,
-          color: edge.node.color || '#858585',
-        });
-      }
-    }
-  }
-
-  // Fetch more repos if needed
-  let hasNextPage = data.user.repositories.pageInfo.hasNextPage;
-  let cursor = data.user.repositories.pageInfo.endCursor;
+  let cursor: string | null = null;
+  let hasNextPage = true;
 
   while (hasNextPage) {
-    const moreData = await fetchMoreLanguages(token, username, cursor);
-    for (const [name, info] of moreData.languages) {
-      const existing = languageMap.get(name);
-      if (existing) {
-        existing.size += info.size;
-      } else {
-        languageMap.set(name, info);
+    const data: LanguageStatsResponse = await graphqlRequest<LanguageStatsResponse>(token, LANGUAGES_QUERY, {
+      username,
+      cursor,
+    });
+
+    for (const repo of data.user.repositories.nodes) {
+      for (const edge of repo.languages.edges) {
+        const name = edge.node.name;
+        const existing = languageMap.get(name);
+        if (existing) {
+          existing.size += edge.size;
+        } else {
+          languageMap.set(name, {
+            size: edge.size,
+            color: edge.node.color || '#858585',
+          });
+        }
       }
     }
-    hasNextPage = moreData.hasNextPage;
-    cursor = moreData.endCursor;
+
+    hasNextPage = data.user.repositories.pageInfo.hasNextPage;
+    cursor = data.user.repositories.pageInfo.endCursor;
   }
 
   // Convert to array, sort by size, and calculate percentages
@@ -293,83 +287,6 @@ export async function fetchLanguageStats(token: string, username: string): Promi
     .slice(0, 10); // Top 10 languages
 
   return languages;
-}
-
-async function fetchMoreLanguages(
-  token: string,
-  username: string,
-  cursor: string | null
-): Promise<{
-  languages: Map<string, { size: number; color: string }>;
-  hasNextPage: boolean;
-  endCursor: string | null;
-}> {
-  const query = `
-    query($username: String!, $cursor: String) {
-      user(login: $username) {
-        repositories(first: 100, ownerAffiliations: OWNER, isFork: false, after: $cursor, orderBy: {direction: DESC, field: SIZE}) {
-          nodes {
-            languages(first: 10, orderBy: {direction: DESC, field: SIZE}) {
-              edges {
-                size
-                node {
-                  name
-                  color
-                }
-              }
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-  `;
-
-  interface LanguageEdge {
-    size: number;
-    node: { name: string; color: string | null };
-  }
-
-  interface MoreLanguagesResponse {
-    user: {
-      repositories: {
-        nodes: Array<{
-          languages: {
-            edges: LanguageEdge[];
-          };
-        }>;
-        pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      };
-    };
-  }
-
-  const data = await graphqlRequest<MoreLanguagesResponse>(token, query, { username, cursor });
-
-  const languageMap = new Map<string, { size: number; color: string }>();
-
-  for (const repo of data.user.repositories.nodes) {
-    for (const edge of repo.languages.edges) {
-      const name = edge.node.name;
-      const existing = languageMap.get(name);
-      if (existing) {
-        existing.size += edge.size;
-      } else {
-        languageMap.set(name, {
-          size: edge.size,
-          color: edge.node.color || '#858585',
-        });
-      }
-    }
-  }
-
-  return {
-    languages: languageMap,
-    hasNextPage: data.user.repositories.pageInfo.hasNextPage,
-    endCursor: data.user.repositories.pageInfo.endCursor,
-  };
 }
 
 export async function fetchStreakStats(token: string, username: string): Promise<StreakStats> {
