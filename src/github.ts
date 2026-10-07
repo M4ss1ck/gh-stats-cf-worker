@@ -199,6 +199,11 @@ async function fetchMoreStars(
   };
 }
 
+// Each repo contributes only its largest few languages. The long tail (config,
+// shell scripts, ...) barely moves the aggregate, and every extra slot costs
+// another 100 nodes per page on GitHub's side.
+export const LANGUAGES_PER_REPO = 5;
+
 // Every page must use the same query and orderBy: a cursor is only valid for
 // the ordering that produced it.
 const LANGUAGES_QUERY = `
@@ -206,7 +211,7 @@ const LANGUAGES_QUERY = `
     user(login: $username) {
       repositories(first: 100, ownerAffiliations: OWNER, isFork: false, after: $cursor, orderBy: {direction: DESC, field: PUSHED_AT}) {
         nodes {
-          languages(first: 10, orderBy: {direction: DESC, field: SIZE}) {
+          languages(first: ${LANGUAGES_PER_REPO}, orderBy: {direction: DESC, field: SIZE}) {
             edges {
               size
               node {

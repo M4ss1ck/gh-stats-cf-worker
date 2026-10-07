@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchLanguageStats } from './github';
+import { fetchLanguageStats, LANGUAGES_PER_REPO } from './github';
 
 // Values GitHub accepts for RepositoryOrder.field. Anything else is rejected
 // with a GraphQL error, which is what broke /languages past 100 repos.
@@ -100,6 +100,26 @@ describe('fetchLanguageStats', () => {
       ['Go', 300, '#000000'],
       ['Rust', 100, '#858585'],
     ]);
+  });
+
+  it('asks GitHub only for the fields it aggregates', async () => {
+    const queries: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        queries.push(JSON.parse(init.body as string).query);
+        return Response.json({
+          data: { user: { repositories: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } },
+        });
+      })
+    );
+
+    await fetchLanguageStats('token', 'user');
+
+    const query = queries[0].replace(/\s+/g, ' ');
+    expect(query).toContain(`languages(first: ${LANGUAGES_PER_REPO},`);
+    expect(LANGUAGES_PER_REPO).toBeLessThan(10);
+    expect(query).toContain('edges { size node { name color } }');
   });
 
   it('surfaces GraphQL errors instead of returning partial data', async () => {
