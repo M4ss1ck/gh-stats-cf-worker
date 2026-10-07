@@ -33,11 +33,30 @@ function parseQueryParams(url: URL): QueryParams {
   };
 }
 
-function svgResponse(svg: string, cacheSeconds: number = 3600): Response {
+// A rendered card is fresh for an hour. After that it may still be served for
+// another day while a newer copy is generated in the background.
+const FRESH_SECONDS = 3600;
+const STALE_SECONDS = 86400;
+export const CARD_CACHE_CONTROL = `public, max-age=${FRESH_SECONDS}, s-maxage=${FRESH_SECONDS}, stale-while-revalidate=${STALE_SECONDS}`;
+
+// Bookkeeping headers on the copy stored in caches.default; never sent to clients.
+const GENERATED_AT_HEADER = 'X-Card-Generated-At';
+const REBUILD_HEADER = 'X-Card-Rebuild';
+
+// The query parameters that change each card's output. Anything else
+// (cache busters like `rebuild`, tracking params, typos) is left out of the
+// cache key so it can't fragment the cache.
+const CARD_PARAMS: Record<string, readonly string[]> = {
+  '/': ['theme', 'hide_border', 'hide_title', 'hide_rank', 'show_icons', 'line_height'],
+  '/languages': ['theme', 'hide_border', 'hide_title', 'layout', 'langs_count'],
+  '/streak': ['theme', 'hide_border', 'hide_title'],
+};
+
+function svgResponse(svg: string): Response {
   return new Response(svg, {
     headers: {
       'Content-Type': 'image/svg+xml',
-      'Cache-Control': `public, max-age=${cacheSeconds}`,
+      'Cache-Control': CARD_CACHE_CONTROL,
       'Access-Control-Allow-Origin': '*',
     },
   });
@@ -98,8 +117,85 @@ async function handleStreak(env: Env, params: QueryParams): Promise<Response> {
   return svgResponse(svg);
 }
 
+async function renderCard(pathname: string, env: Env, params: QueryParams): Promise<Response> {
+  try {
+    switch (pathname) {
+      case '/':
+        return await handleStats(env, params);
+      case '/languages':
+        return await handleLanguages(env, params);
+      case '/streak':
+        return await handleStreak(env, params);
+      default:
+        return errorResponse('Not Found: Use /, /languages, or /streak', 404);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    console.error('Error generating card:', message);
+    return errorResponse(message.substring(0, 60), 500);
+  }
+}
+
+// One cache entry per (path, card-affecting params), with params sorted so
+// `?a=1&b=2` and `?b=2&a=1` share an entry.
+function cacheKey(url: URL, cardParams: readonly string[]): Request {
+  const key = new URL(url.pathname, url.origin);
+  for (const name of [...cardParams].sort()) {
+    const value = url.searchParams.get(name);
+    if (value !== null) key.searchParams.set(name, value);
+  }
+  return new Request(key.toString(), { method: 'GET' });
+}
+
+async function storeCard(cache: Cache, key: Request, response: Response, rebuild: string): Promise<void> {
+  const headers = new Headers(response.headers);
+  // Keep the entry through the stale window; freshness is judged from
+  // GENERATED_AT_HEADER on read, not by the cache's own expiry.
+  headers.set('Cache-Control', `public, max-age=${FRESH_SECONDS + STALE_SECONDS}`);
+  headers.set(GENERATED_AT_HEADER, String(Date.now()));
+  headers.set(REBUILD_HEADER, rebuild);
+  await cache.put(key, new Response(response.body, { status: response.status, headers }));
+}
+
+// Renders a card and, if it succeeded, schedules it to be cached. Error
+// responses are returned as-is and never stored.
+async function renderAndStore(
+  pathname: string,
+  env: Env,
+  params: QueryParams,
+  cache: Cache,
+  key: Request,
+  rebuild: string,
+  ctx: ExecutionContext
+): Promise<Response> {
+  const response = await renderCard(pathname, env, params);
+  if (response.status === 200) {
+    ctx.waitUntil(
+      storeCard(cache, key, response.clone(), rebuild).catch((error) => {
+        console.error('Error caching card:', error instanceof Error ? error.message : error);
+      })
+    );
+  }
+  return response;
+}
+
+function fromCache(cached: Response, status: 'HIT' | 'STALE'): Response {
+  const headers = new Headers(cached.headers);
+  headers.set('Cache-Control', CARD_CACHE_CONTROL);
+  headers.delete(GENERATED_AT_HEADER);
+  headers.delete(REBUILD_HEADER);
+  headers.set('X-Cache', status);
+  return new Response(cached.body, { status: cached.status, headers });
+}
+
+function withCacheStatus(response: Response, status: 'MISS' | 'BYPASS'): Response {
+  const headers = new Headers(response.headers);
+  headers.set('X-Cache', status);
+  return new Response(response.body, { status: response.status, headers });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const pathname = url.pathname;
     const params = parseQueryParams(url);
@@ -112,21 +208,41 @@ export default {
       return errorResponse('GITHUB_USERNAME not configured', 500);
     }
 
-    try {
-      switch (pathname) {
-        case '/':
-          return await handleStats(env, params);
-        case '/languages':
-          return await handleLanguages(env, params);
-        case '/streak':
-          return await handleStreak(env, params);
-        default:
-          return errorResponse('Not Found: Use /, /languages, or /streak', 404);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('Error generating card:', message);
-      return errorResponse(message.substring(0, 60), 500);
+    const cardParams = CARD_PARAMS[pathname];
+    if (!cardParams) {
+      return errorResponse('Not Found: Use /, /languages, or /streak', 404);
     }
+
+    // `rebuild` is not part of the key. Instead the entry remembers the value it
+    // was rendered for, and a request carrying a different value forces a fresh
+    // render that replaces the entry. Requests without `rebuild` take whatever
+    // is cached.
+    const requestedRebuild = url.searchParams.get('rebuild');
+    const cache = caches.default;
+    const key = cacheKey(url, cardParams);
+
+    let cached: Response | undefined;
+    try {
+      cached = await cache.match(key);
+    } catch (error) {
+      console.error('Error reading cache:', error instanceof Error ? error.message : error);
+    }
+
+    if (cached) {
+      const cachedRebuild = cached.headers.get(REBUILD_HEADER) ?? '';
+      if (requestedRebuild === null || requestedRebuild === cachedRebuild) {
+        const age = Date.now() - Number(cached.headers.get(GENERATED_AT_HEADER) ?? 0);
+        if (age < FRESH_SECONDS * 1000) {
+          return fromCache(cached, 'HIT');
+        }
+        // Stale: answer now, refresh in the background so the next viewer gets
+        // a fresh card without ever waiting on GitHub.
+        ctx.waitUntil(renderAndStore(pathname, env, params, cache, key, cachedRebuild, ctx));
+        return fromCache(cached, 'STALE');
+      }
+    }
+
+    const response = await renderAndStore(pathname, env, params, cache, key, requestedRebuild ?? '', ctx);
+    return withCacheStatus(response, response.status === 200 ? 'MISS' : 'BYPASS');
   },
 };

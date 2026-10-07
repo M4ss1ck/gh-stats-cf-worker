@@ -171,7 +171,15 @@ All endpoints support the following parameters:
 
 ## Caching
 
-Responses are cached for 1 hour (`Cache-Control: public, max-age=3600`) to reduce API calls and improve performance.
+Rendered cards are cached at the edge with the Workers Cache API (`caches.default`), so most requests never touch the GitHub API. This matters most for `/languages`, which needs one GraphQL request per 100 repositories and can otherwise be too slow for GitHub's image proxy (camo), which then shows a broken image.
+
+- **Fresh for 1 hour.** Clients get `Cache-Control: public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400`.
+- **Stale-while-revalidate.** For up to a day after that, the cached card is served immediately while a new one is rendered in the background. A slow render only happens on the very first request for a card, or after it has gone unused for more than a day.
+- **Errors are never cached**, so a GitHub hiccup doesn't stick around.
+- **Cache key.** Only the parameters that change a card (`theme`, `layout`, …) are part of the key, sorted. Others such as `utm_*` are ignored.
+- **`rebuild`.** Not part of the key, so it doesn't create an entry per value. Changing it (for example `rebuild=2`) forces one fresh render that replaces the cached card. Requests without `rebuild` get whatever is cached.
+
+Responses include an `X-Cache` header (`HIT`, `STALE`, `MISS`, or `BYPASS` for errors). The Cache API does nothing on `*.workers.dev` subdomains, so use a custom domain.
 
 ## Project Structure
 
